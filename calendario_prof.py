@@ -1,10 +1,22 @@
 import csv
-import webbrowser
 from collections import defaultdict
+import webbrowser
 
-# ==============================
+# Calendario de clases para profesores y grupos
+# Usando backtracking con restricciones
+# Restricciones:
+#  - Profesores tienen horas no disponibles (CSV)
+#  - Máx 4 horas/día por profesor
+#  - No repetir la misma asignatura el mismo día para un grupo
+#  - Sin solapes de profesor, grupo ni aula
+#  - El mismo profesor no puede dar 4h seguidas al mismo grupo
+# Entrada: archivos CSV con datos de profes, grupos, aulas, clases y restricciones
+# Salida: horario generado en texto y HTML
+
+
+
 # 1. Dominios de tiempo (fijos)
-# ==============================
+
 
 days = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
 
@@ -13,7 +25,7 @@ hours = ["8-10", "10-12", "16-18", "18-20"]
 
 time_slots = [(d, h) for d in days for h in hours]
 
-# Relación de bloque anterior (dentro de mañana y dentro de tarde)
+# Relación de bloque anterior (no dos clases iguales seguidas)
 previous_hour = {
     "10-12": "8-10",
     "8-10":  None,
@@ -21,9 +33,9 @@ previous_hour = {
     "16-18": None
 }
 
-# ==============================
+
 # 2. Cargar datos desde CSV
-# ==============================
+
 
 def load_single_column_csv(filename, fieldname):
     values = []
@@ -60,9 +72,9 @@ with open("restricciones_profes.csv", newline="", encoding="utf-8") as f:
         hour    = row["hour"]
         teacher_forbidden.add((teacher, day, hour))
 
-# ==============================
+
 # 3. Expandir clases a sesiones (cada sesión = 1 bloque de 2h)
-# ==============================
+
 
 sessions = []
 for c in classes:
@@ -73,29 +85,48 @@ for c in classes:
             "teacher": c["teacher"]
         })
 
-# Heurística simple: ordenar sesiones
+# ordenar sesiones, preparar datos
 sessions.sort(key=lambda s: (s["teacher"], s["group"], s["subject"]))
 
-# ==============================
-# 4. Estructuras de estado
-# ==============================
 
+# 4. Estructuras de estado
+
+
+# Quién está ocupado en cada (día, bloque)
 busy_teacher = defaultdict(set)         # (day, hour) -> {teachers}
 busy_group   = defaultdict(set)         # (day, hour) -> {groups}
 busy_room    = defaultdict(set)         # (day, hour) -> {rooms}
 
+# Cuántos bloques de 2h lleva ya cada profesor en cada día (máx 2)
 teacher_blocks_per_day = defaultdict(int)  # (teacher, day) -> bloques asignados
+
+# Pares (profesor, grupo) en cada franja
 tg_pairs = defaultdict(set)                # (day, hour) -> {(teacher, group)}
 
-timetable = []  # resultado
+# Asignaturas que ya tiene un grupo en un día
+# (para no repetir la misma asignatura el mismo día)
+group_subjects_per_day = defaultdict(set)  # (group, day) -> {subjects}
+
+# Horario resultado
+timetable = []  # lista de dicts con las asignaciones
 
 
-# ==============================
+
 # 5. Función de validez
-# ==============================
+
 
 def is_valid(session, slot, room):
+    """
+    Restricciones:
+      - Profesor disponible (CSV)
+      - Profesor máx. 4 horas/día -> 2 bloques de 2h
+      - No repetir la misma asignatura el mismo día para un grupo
+      - Sin solapes de profesor, grupo ni aula
+      - El mismo profesor no puede dar 4h seguidas al mismo grupo
+        (no dos bloques consecutivos con ese grupo)
+    """
     group   = session["group"]
+    subject = session["subject"]
     teacher = session["teacher"]
     day, hour = slot
 
@@ -103,13 +134,17 @@ def is_valid(session, slot, room):
     if (teacher, day, hour) in teacher_forbidden:
         return False
 
-    # 1) Máximo 4 horas/día -> 2 bloques por día
+    # 1) Máx 4 horas/día -> 2 bloques de 2h por día y profesor
     if teacher_blocks_per_day[(teacher, day)] >= 2:
+        return False
+
+    # 2) No repetir asignatura el mismo día para ese grupo
+    if subject in group_subjects_per_day[(group, day)]:
         return False
 
     key = (day, hour)
 
-    # 2) Sin solapes
+    # 3) Sin solapes en la franja
     if teacher in busy_teacher[key]:
         return False
     if group in busy_group[key]:
@@ -117,7 +152,7 @@ def is_valid(session, slot, room):
     if room in busy_room[key]:
         return False
 
-    # 3) No permitir dos bloques consecutivos al mismo grupo con el mismo profesor
+    # 4) No permitir dos bloques consecutivos al mismo grupo con el mismo profesor
     prev = previous_hour.get(hour)
     if prev is not None:
         if (teacher, group) in tg_pairs[(day, prev)]:
@@ -127,9 +162,9 @@ def is_valid(session, slot, room):
     return True
 
 
-# ==============================
+
 # 6. Backtracking
-# ==============================
+
 
 def backtrack(i):
     if i == len(sessions):
@@ -144,6 +179,7 @@ def backtrack(i):
                 key = (day, hour)
                 teacher = session["teacher"]
                 group   = session["group"]
+                subject = session["subject"]
 
                 # Hacer movimiento
                 busy_teacher[key].add(teacher)
@@ -151,34 +187,36 @@ def backtrack(i):
                 busy_room[key].add(room)
                 teacher_blocks_per_day[(teacher, day)] += 1
                 tg_pairs[key].add((teacher, group))
+                group_subjects_per_day[(group, day)].add(subject)
 
                 timetable.append({
                     "group": group,
-                    "subject": session["subject"],
+                    "subject": subject,
                     "teacher": teacher,
                     "day": day,
-                    "hour": hour,
+                    "hour": hour,  # bloque de 2h
                     "room": room
                 })
 
                 if backtrack(i + 1):
                     return True
 
-                # Deshacer
+                # Deshacer las cosas no incluidas por restricciones
                 timetable.pop()
                 busy_teacher[key].remove(teacher)
                 busy_group[key].remove(group)
                 busy_room[key].remove(room)
                 teacher_blocks_per_day[(teacher, day)] -= 1
                 tg_pairs[key].remove((teacher, group))
+                group_subjects_per_day[(group, day)].remove(subject)
 
     return False
 
 
 
-# =============================
-# 8. Codigo pasar a HTML
-# ============================= 
+# 7. Exportar a HTML
+
+
 def export_to_html(timetable, filename="horario.html"):
     """
     Genera un archivo HTML con un horario por grupo.
@@ -190,17 +228,16 @@ def export_to_html(timetable, filename="horario.html"):
         g = entry["group"]
         by_group.setdefault(g, []).append(entry)
 
-    # Empezar HTML
     html = []
     html.append("<!DOCTYPE html>")
     html.append("<html lang='es'>")
     html.append("<head>")
     html.append("<meta charset='UTF-8'>")
     html.append("<title>Horario generado</title>")
-    # CSS sencillo
     html.append("""
     <style>
       body { font-family: Arial, sans-serif; padding: 20px; }
+      h1 { margin-bottom: 10px; }
       h2 { margin-top: 40px; }
       table { border-collapse: collapse; margin-bottom: 30px; }
       th, td { border: 1px solid #555; padding: 6px 10px; text-align: center; }
@@ -212,7 +249,6 @@ def export_to_html(timetable, filename="horario.html"):
     html.append("<body>")
     html.append("<h1>Horario generado</h1>")
 
-    # Para cada grupo, construimos una tabla
     for group, entries in by_group.items():
         html.append(f"<h2>Grupo {group}</h2>")
         html.append("<table>")
@@ -223,7 +259,7 @@ def export_to_html(timetable, filename="horario.html"):
             html.append(f"<th>{d}</th>")
         html.append("</tr>")
 
-        # Mapa (day, hour) -> texto
+        # Mapa (day, hour) -> entrada
         cell = {(e["day"], e["hour"]): e for e in entries}
 
         # Filas por bloque horario
@@ -235,7 +271,6 @@ def export_to_html(timetable, filename="horario.html"):
                 if e is None:
                     html.append("<td class='empty'>-</td>")
                 else:
-                    # mostramos asignatura, profesor y aula
                     html.append(
                         "<td>"
                         f"{e['subject']}<br>"
@@ -248,7 +283,6 @@ def export_to_html(timetable, filename="horario.html"):
 
     html.append("</body></html>")
 
-    # Escribir a archivo
     with open(filename, "w", encoding="utf-8") as f:
         f.write("\n".join(html))
 
@@ -256,26 +290,24 @@ def export_to_html(timetable, filename="horario.html"):
 
 
 
+# 8. Ejecutar y mostrar
 
-# ==============================
-# 7. Ejecutar y mostrar
-# ==============================
 
 if backtrack(0):
     timetable_sorted = sorted(
         timetable,
         key=lambda x: (days.index(x["day"]), hours.index(x["hour"]), x["room"])
     )
-
-    print("HORARIO GENERADO:\n")
+    #Escritura en terminal
+    print("HORARIO GENERADO (texto):\n")
     for entry in timetable_sorted:
         print(f'{entry["day"]:10} {entry["hour"]:6} | {entry["room"]:7} | '
               f'{entry["group"]:7} - {entry["subject"]:15} ({entry["teacher"]})')
-    # Exportar a HTML
-    export_to_html(timetable_sorted, "horario.html")  
-    # Abrir en navegador
+
+    # Exportar a HTML y abrir en el navegador
+    export_to_html(timetable_sorted, "horario.html")
     webbrowser.open("horario.html")
+
 else:
     print("No se ha encontrado un horario válido con las restricciones dadas.")
-
 
